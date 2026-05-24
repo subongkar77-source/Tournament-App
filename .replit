@@ -30,3 +30,10 @@ externalPort = 80
 [[ports]]
 localPort = 18115
 externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN = "tournamentapp-5b167.firebaseapp.com"
+EXPO_PUBLIC_FIREBASE_PROJECT_ID = "tournamentapp-5b167"
+EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET = "tournamentapp-5b167.appspot.com"
