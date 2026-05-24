@@ -119,6 +119,15 @@ export default function ProfileScreen() {
         </View>
 
         <TouchableOpacity
+          style={[styles.adminBtn, { backgroundColor: "#ff6b0018", borderColor: "#ff6b0044" }]}
+          onPress={() => router.push("/admin")}
+          activeOpacity={0.8}
+        >
+          <Feather name="shield" size={16} color="#ff6b00" />
+          <Text style={[styles.logoutText, { color: "#ff6b00" }]}>Admin Dashboard</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
           style={[styles.logoutBtn, { backgroundColor: colors.destructive + "18", borderColor: colors.destructive + "44" }]}
           onPress={handleLogout}
           activeOpacity={0.8}
@@ -160,6 +169,7 @@ const styles = StyleSheet.create({
   howNum: { width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center" },
   howNumText: { fontSize: 11, fontWeight: "700" },
   howText: { fontSize: 13, flex: 1, lineHeight: 18 },
+  adminBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 14, borderWidth: 1, paddingVertical: 14 },
   logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 14, borderWidth: 1, paddingVertical: 14 },
   logoutText: { fontSize: 15, fontWeight: "700" },
 });
