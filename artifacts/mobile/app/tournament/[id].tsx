@@ -68,10 +68,11 @@ export default function TournamentDetailScreen() {
   }
 
   async function handlePaymentConfirm(upiId: string, screenshot: string) {
-    if (!user) return;
+    if (!user || !tournament) return;
     await joinTournament(tournament.id, user.id, {
       userId: user.id,
       tournamentId: tournament.id,
+      tournamentTitle: tournament.title,
       amount: tournament.entryFee,
       screenshot,
       status: "pending",

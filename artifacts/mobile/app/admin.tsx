@@ -2,6 +2,7 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -15,16 +16,15 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { useTournaments, Tournament } from "@/contexts/TournamentContext";
+import { Tournament, useTournaments } from "@/contexts/TournamentContext";
 
 const ADMIN_PASSWORD = "admin@FF2024";
-const COLORS = {
+
+const C = {
   bg: "#0a0a0f",
   card: "#12121a",
   cardBorder: "#1e1e2e",
   primary: "#ff6b00",
-  primaryDark: "#cc5500",
-  accent: "#ffd700",
   success: "#22c55e",
   danger: "#ef4444",
   warning: "#f59e0b",
@@ -35,6 +35,7 @@ const COLORS = {
 };
 
 type Tab = "tournaments" | "payments" | "room";
+
 type TournamentForm = {
   title: string;
   type: "Solo" | "Duo" | "Squad";
@@ -49,7 +50,7 @@ type TournamentForm = {
   roomPassword: string;
 };
 
-const DEFAULT_FORM: TournamentForm = {
+const EMPTY_FORM: TournamentForm = {
   title: "",
   type: "Solo",
   entryFee: "",
@@ -63,87 +64,171 @@ const DEFAULT_FORM: TournamentForm = {
   roomPassword: "",
 };
 
+function tournamentToForm(t: Tournament): TournamentForm {
+  return {
+    title: t.title,
+    type: t.type,
+    entryFee: String(t.entryFee),
+    prizePool: String(t.prizePool),
+    totalSlots: String(t.totalSlots),
+    date: t.date,
+    time: t.time,
+    map: t.map,
+    status: t.status,
+    roomId: t.roomId ?? "",
+    roomPassword: t.roomPassword ?? "",
+  };
+}
+
+function validateForm(form: TournamentForm): string | null {
+  if (!form.title.trim()) return "Tournament name is required.";
+  if (!form.entryFee || isNaN(Number(form.entryFee)) || Number(form.entryFee) < 0)
+    return "Enter a valid entry fee (0 or more).";
+  if (!form.prizePool || isNaN(Number(form.prizePool)) || Number(form.prizePool) < 0)
+    return "Enter a valid prize pool (0 or more).";
+  if (!form.date.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(form.date.trim()))
+    return "Date must be in YYYY-MM-DD format.";
+  if (!form.time.trim()) return "Match time is required (e.g. 8:00 PM).";
+  return null;
+}
+
 export default function AdminScreen() {
   const router = useRouter();
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const {
+    tournaments,
+    firestoreTournaments,
+    payments,
+    joinedMatches,
+    firebaseError,
+    addTournament,
+    updateTournament,
+    deleteTournament,
+    verifyPayment,
+    rejectPayment,
+  } = useTournaments();
+
+  const [authed, setAuthed] = useState(false);
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [showPw, setShowPw] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("tournaments");
-  const [showCreateForm, setShowCreateForm] = useState(false);
-  const [form, setForm] = useState<TournamentForm>(DEFAULT_FORM);
+
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<TournamentForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const [roomTargetId, setRoomTargetId] = useState("");
   const [roomId, setRoomId] = useState("");
   const [roomPass, setRoomPass] = useState("");
+  const [settingRoom, setSettingRoom] = useState(false);
 
-  const { tournaments, payments, joinedMatches, addTournament, deleteTournament, updateTournament, verifyPayment, rejectPayment } = useTournaments();
+  const pendingPayments = payments.filter((p) => p.status === "pending");
 
   function handleLogin() {
     if (password === ADMIN_PASSWORD) {
-      setIsAuthenticated(true);
+      setAuthed(true);
     } else {
-      Alert.alert("Access Denied", "Incorrect admin password.");
+      Alert.alert("Access Denied", "Incorrect admin password. Please try again.");
     }
   }
 
-  function handleField(key: keyof TournamentForm, value: string) {
+  function openCreate() {
+    setEditingId(null);
+    setForm(EMPTY_FORM);
+    setShowForm(true);
+  }
+
+  function openEdit(t: Tournament) {
+    setEditingId(t.id);
+    setForm(tournamentToForm(t));
+    setShowForm(true);
+  }
+
+  function closeForm() {
+    setShowForm(false);
+    setEditingId(null);
+    setForm(EMPTY_FORM);
+  }
+
+  function setField<K extends keyof TournamentForm>(key: K, value: TournamentForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  async function handleCreate() {
-    if (!form.title.trim()) return Alert.alert("Error", "Tournament name is required.");
-    if (!form.entryFee || isNaN(Number(form.entryFee))) return Alert.alert("Error", "Enter a valid entry fee.");
-    if (!form.prizePool || isNaN(Number(form.prizePool))) return Alert.alert("Error", "Enter a valid prize pool.");
-    if (!form.date.trim()) return Alert.alert("Error", "Match date is required (e.g. 2026-06-01).");
-    if (!form.time.trim()) return Alert.alert("Error", "Match time is required (e.g. 8:00 PM).");
+  async function handleSave() {
+    const err = validateForm(form);
+    if (err) return Alert.alert("Validation Error", err);
 
     setSaving(true);
     try {
-      await addTournament({
+      const payload = {
         title: form.title.trim(),
         type: form.type,
         entryFee: Number(form.entryFee),
         prizePool: Number(form.prizePool),
         totalSlots: Number(form.totalSlots) || 100,
-        filledSlots: 0,
+        filledSlots: editingId
+          ? (firestoreTournaments.find((t) => t.id === editingId)?.filledSlots ?? 0)
+          : 0,
         date: form.date.trim(),
         time: form.time.trim(),
-        map: form.map || "Bermuda",
+        map: form.map.trim() || "Bermuda",
         status: form.status,
         roomId: form.roomId.trim() || undefined,
         roomPassword: form.roomPassword.trim() || undefined,
-      });
-      setForm(DEFAULT_FORM);
-      setShowCreateForm(false);
-      Alert.alert("Success", "Tournament created! It will appear on the home screen.");
-    } catch {
-      Alert.alert("Error", "Failed to create tournament.");
+      };
+
+      if (editingId) {
+        await updateTournament(editingId, payload);
+        Alert.alert("Updated", `"${payload.title}" has been updated.`);
+      } else {
+        await addTournament(payload);
+        Alert.alert("Created", `"${payload.title}" is now live on the home screen.`);
+      }
+      closeForm();
+    } catch (e: any) {
+      Alert.alert("Firebase Error", e?.message ?? "Something went wrong. Check your Firestore rules and internet connection.");
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleDelete(id: string, title: string) {
-    Alert.alert("Delete Tournament", `Delete "${title}"?`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          await deleteTournament(id);
+  async function handleDelete(t: Tournament) {
+    Alert.alert(
+      "Delete Tournament",
+      `Delete "${t.title}"? This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            setDeletingId(t.id);
+            try {
+              await deleteTournament(t.id);
+            } catch (e: any) {
+              Alert.alert("Error", e?.message ?? "Failed to delete tournament.");
+            } finally {
+              setDeletingId(null);
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   }
 
   async function handleVerify(paymentId: string, matchId: string, title: string) {
-    Alert.alert("Verify Payment", `Verify payment for "${title}"?`, [
+    Alert.alert("Verify Payment", `Confirm payment for "${title}"?`, [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Verify",
+        text: "Verify ✓",
         onPress: async () => {
-          await verifyPayment(paymentId, matchId);
-          Alert.alert("Done", "Payment verified. Player's match is confirmed.");
+          try {
+            await verifyPayment(paymentId, matchId);
+            Alert.alert("Done", "Payment verified. Player's match is confirmed.");
+          } catch (e: any) {
+            Alert.alert("Error", e?.message ?? "Failed to verify payment.");
+          }
         },
       },
     ]);
@@ -156,7 +241,11 @@ export default function AdminScreen() {
         text: "Reject",
         style: "destructive",
         onPress: async () => {
-          await rejectPayment(paymentId, matchId);
+          try {
+            await rejectPayment(paymentId, matchId);
+          } catch (e: any) {
+            Alert.alert("Error", e?.message ?? "Failed to reject payment.");
+          }
         },
       },
     ]);
@@ -166,51 +255,56 @@ export default function AdminScreen() {
     if (!roomTargetId) return Alert.alert("Error", "Select a tournament first.");
     if (!roomId.trim()) return Alert.alert("Error", "Room ID is required.");
     if (!roomPass.trim()) return Alert.alert("Error", "Room Password is required.");
-    await updateTournament(roomTargetId, { roomId: roomId.trim(), roomPassword: roomPass.trim(), status: "live" });
-    setRoomTargetId("");
-    setRoomId("");
-    setRoomPass("");
-    Alert.alert("Done", "Room ID & Password set. Match status set to LIVE.");
+    setSettingRoom(true);
+    try {
+      await updateTournament(roomTargetId, {
+        roomId: roomId.trim(),
+        roomPassword: roomPass.trim(),
+        status: "live",
+      });
+      setRoomTargetId("");
+      setRoomId("");
+      setRoomPass("");
+      Alert.alert("Done", "Room ID & Password set. Match is now LIVE!");
+    } catch (e: any) {
+      Alert.alert("Error", e?.message ?? "Failed to set room details.");
+    } finally {
+      setSettingRoom(false);
+    }
   }
 
-  const pendingPayments = payments.filter((p) => p.status === "pending");
-  const customTournaments = tournaments.filter((t) => t.isCustom);
-
-  if (!isAuthenticated) {
+  if (!authed) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={s.safe}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
-          <View style={styles.loginContainer}>
-            <Pressable onPress={() => router.back()} style={styles.backBtn}>
-              <Feather name="arrow-left" size={22} color={COLORS.muted} />
+          <View style={s.loginWrap}>
+            <Pressable onPress={() => router.back()} style={s.backBtn}>
+              <Feather name="arrow-left" size={22} color={C.muted} />
             </Pressable>
-
-            <View style={styles.loginContent}>
-              <View style={styles.shieldIcon}>
-                <Feather name="shield" size={40} color={COLORS.primary} />
+            <View style={s.loginBody}>
+              <View style={s.shield}>
+                <Feather name="shield" size={40} color={C.primary} />
               </View>
-              <Text style={styles.loginTitle}>Admin Access</Text>
-              <Text style={styles.loginSubtitle}>Enter password to manage tournaments</Text>
-
-              <View style={styles.inputWrapper}>
-                <Feather name="lock" size={18} color={COLORS.muted} style={styles.inputIcon} />
+              <Text style={s.loginTitle}>Admin Access</Text>
+              <Text style={s.loginSub}>Enter password to manage tournaments</Text>
+              <View style={s.inputRow}>
+                <Feather name="lock" size={18} color={C.muted} style={{ paddingHorizontal: 14 }} />
                 <TextInput
-                  style={styles.loginInput}
+                  style={s.loginInput}
                   placeholder="Admin Password"
-                  placeholderTextColor={COLORS.muted}
-                  secureTextEntry={!showPassword}
+                  placeholderTextColor={C.muted}
+                  secureTextEntry={!showPw}
                   value={password}
                   onChangeText={setPassword}
                   onSubmitEditing={handleLogin}
                   autoCapitalize="none"
                 />
-                <Pressable onPress={() => setShowPassword((v) => !v)} style={styles.eyeBtn}>
-                  <Feather name={showPassword ? "eye-off" : "eye"} size={18} color={COLORS.muted} />
+                <Pressable onPress={() => setShowPw((v) => !v)} style={{ padding: 14 }}>
+                  <Feather name={showPw ? "eye-off" : "eye"} size={18} color={C.muted} />
                 </Pressable>
               </View>
-
-              <Pressable style={styles.loginBtn} onPress={handleLogin}>
-                <Text style={styles.loginBtnText}>Enter Dashboard</Text>
+              <Pressable style={s.loginBtn} onPress={handleLogin}>
+                <Text style={s.loginBtnText}>Enter Dashboard</Text>
               </Pressable>
             </View>
           </View>
@@ -220,418 +314,671 @@ export default function AdminScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backBtn}>
-          <Feather name="arrow-left" size={22} color={COLORS.muted} />
+    <SafeAreaView style={s.safe}>
+      <View style={s.header}>
+        <Pressable onPress={() => router.back()} style={s.backBtn}>
+          <Feather name="arrow-left" size={22} color={C.muted} />
         </Pressable>
-        <View style={styles.headerCenter}>
-          <Feather name="shield" size={18} color={COLORS.primary} />
-          <Text style={styles.headerTitle}>Admin Dashboard</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Feather name="shield" size={18} color={C.primary} />
+          <Text style={s.headerTitle}>Admin Dashboard</Text>
         </View>
-        <Pressable onPress={() => setIsAuthenticated(false)} style={styles.logoutBtn}>
-          <Feather name="log-out" size={18} color={COLORS.danger} />
+        <Pressable onPress={() => setAuthed(false)} style={s.backBtn}>
+          <Feather name="log-out" size={18} color={C.danger} />
         </Pressable>
       </View>
 
-      <View style={styles.tabs}>
+      {firebaseError ? (
+        <View style={s.errorBanner}>
+          <Feather name="wifi-off" size={14} color={C.danger} />
+          <Text style={s.errorBannerText}>
+            Firebase: {firebaseError.includes("permission") ? "Firestore rules blocking access — enable read/write in Firebase Console" : firebaseError}
+          </Text>
+        </View>
+      ) : null}
+
+      <View style={s.tabs}>
         {(["tournaments", "payments", "room"] as Tab[]).map((tab) => (
           <Pressable
             key={tab}
             onPress={() => setActiveTab(tab)}
-            style={[styles.tab, activeTab === tab && styles.tabActive]}
+            style={[s.tab, activeTab === tab && s.tabActive]}
           >
-            <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
-              {tab === "tournaments" ? "🏆 Tournaments" : tab === "payments" ? `💳 Payments${pendingPayments.length > 0 ? ` (${pendingPayments.length})` : ""}` : "🚪 Room ID"}
+            <Text style={[s.tabText, activeTab === tab && s.tabTextActive]}>
+              {tab === "tournaments"
+                ? "🏆 Tournaments"
+                : tab === "payments"
+                ? `💳 Payments${pendingPayments.length > 0 ? ` (${pendingPayments.length})` : ""}`
+                : "🚪 Room ID"}
             </Text>
           </Pressable>
         ))}
       </View>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView style={{ flex: 1, padding: 16 }} showsVerticalScrollIndicator={false}>
         {activeTab === "tournaments" && (
-          <View>
-            {!showCreateForm ? (
-              <Pressable style={styles.createBtn} onPress={() => setShowCreateForm(true)}>
-                <Feather name="plus-circle" size={20} color="#000" />
-                <Text style={styles.createBtnText}>Create New Tournament</Text>
-              </Pressable>
-            ) : (
-              <View style={styles.formCard}>
-                <Text style={styles.formTitle}>New Tournament</Text>
-
-                <Text style={styles.label}>Tournament Name *</Text>
-                <TextInput style={styles.input} placeholder="e.g. Night Warriors Cup" placeholderTextColor={COLORS.muted} value={form.title} onChangeText={(v) => handleField("title", v)} />
-
-                <Text style={styles.label}>Mode *</Text>
-                <View style={styles.pillRow}>
-                  {(["Solo", "Duo", "Squad"] as const).map((t) => (
-                    <Pressable key={t} onPress={() => handleField("type", t)} style={[styles.pill, form.type === t && styles.pillActive]}>
-                      <Text style={[styles.pillText, form.type === t && styles.pillTextActive]}>{t}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                <View style={styles.row}>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Entry Fee (₹) *</Text>
-                    <TextInput style={styles.input} placeholder="50" placeholderTextColor={COLORS.muted} keyboardType="numeric" value={form.entryFee} onChangeText={(v) => handleField("entryFee", v)} />
-                  </View>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Prize Pool (₹) *</Text>
-                    <TextInput style={styles.input} placeholder="5000" placeholderTextColor={COLORS.muted} keyboardType="numeric" value={form.prizePool} onChangeText={(v) => handleField("prizePool", v)} />
-                  </View>
-                </View>
-
-                <View style={styles.row}>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Total Slots</Text>
-                    <TextInput style={styles.input} placeholder="100" placeholderTextColor={COLORS.muted} keyboardType="numeric" value={form.totalSlots} onChangeText={(v) => handleField("totalSlots", v)} />
-                  </View>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Map</Text>
-                    <TextInput style={styles.input} placeholder="Bermuda" placeholderTextColor={COLORS.muted} value={form.map} onChangeText={(v) => handleField("map", v)} />
-                  </View>
-                </View>
-
-                <View style={styles.row}>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Date * (YYYY-MM-DD)</Text>
-                    <TextInput style={styles.input} placeholder="2026-06-01" placeholderTextColor={COLORS.muted} value={form.date} onChangeText={(v) => handleField("date", v)} />
-                  </View>
-                  <View style={styles.halfField}>
-                    <Text style={styles.label}>Time *</Text>
-                    <TextInput style={styles.input} placeholder="8:00 PM" placeholderTextColor={COLORS.muted} value={form.time} onChangeText={(v) => handleField("time", v)} />
-                  </View>
-                </View>
-
-                <Text style={styles.label}>Status</Text>
-                <View style={styles.pillRow}>
-                  {(["upcoming", "live", "completed"] as const).map((s) => (
-                    <Pressable key={s} onPress={() => handleField("status", s)} style={[styles.pill, form.status === s && styles.pillActive]}>
-                      <Text style={[styles.pillText, form.status === s && styles.pillTextActive]}>{s.charAt(0).toUpperCase() + s.slice(1)}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                <Text style={styles.label}>Room ID (optional)</Text>
-                <TextInput style={styles.input} placeholder="Leave blank for upcoming" placeholderTextColor={COLORS.muted} value={form.roomId} onChangeText={(v) => handleField("roomId", v)} />
-
-                <Text style={styles.label}>Room Password (optional)</Text>
-                <TextInput style={styles.input} placeholder="Leave blank for upcoming" placeholderTextColor={COLORS.muted} value={form.roomPassword} onChangeText={(v) => handleField("roomPassword", v)} />
-
-                <View style={styles.formActions}>
-                  <Pressable style={styles.cancelBtn} onPress={() => { setShowCreateForm(false); setForm(DEFAULT_FORM); }}>
-                    <Text style={styles.cancelBtnText}>Cancel</Text>
-                  </Pressable>
-                  <Pressable style={[styles.saveBtn, saving && styles.saveBtnDisabled]} onPress={handleCreate} disabled={saving}>
-                    <Text style={styles.saveBtnText}>{saving ? "Saving..." : "Create"}</Text>
-                  </Pressable>
-                </View>
-              </View>
-            )}
-
-            <Text style={styles.sectionTitle}>Your Tournaments ({customTournaments.length})</Text>
-            {customTournaments.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Feather name="inbox" size={32} color={COLORS.muted} />
-                <Text style={styles.emptyText}>No custom tournaments yet.</Text>
-                <Text style={styles.emptySubText}>Create one above to see it here and on the home screen.</Text>
-              </View>
-            ) : (
-              customTournaments.map((t) => (
-                <View key={t.id} style={styles.tournamentRow}>
-                  <View style={styles.tournamentInfo}>
-                    <Text style={styles.tournamentName}>{t.title}</Text>
-                    <Text style={styles.tournamentMeta}>{t.type} · ₹{t.entryFee} entry · Prize ₹{t.prizePool.toLocaleString()}</Text>
-                    <Text style={styles.tournamentMeta}>{t.date} · {t.time}</Text>
-                    <View style={[styles.statusBadge, t.status === "live" ? styles.statusLive : t.status === "completed" ? styles.statusDone : styles.statusUp]}>
-                      <Text style={styles.statusText}>{t.status.toUpperCase()}</Text>
-                    </View>
-                  </View>
-                  <Pressable style={styles.deleteBtn} onPress={() => handleDelete(t.id, t.title)}>
-                    <Feather name="trash-2" size={18} color={COLORS.danger} />
-                  </Pressable>
-                </View>
-              ))
-            )}
-
-            <Text style={styles.sectionTitle}>Default Tournaments ({tournaments.filter(t => !t.isCustom).length})</Text>
-            {tournaments.filter(t => !t.isCustom).map((t) => (
-              <View key={t.id} style={[styles.tournamentRow, styles.defaultRow]}>
-                <View style={styles.tournamentInfo}>
-                  <Text style={styles.tournamentName}>{t.title}</Text>
-                  <Text style={styles.tournamentMeta}>{t.type} · ₹{t.entryFee} entry · Prize ₹{t.prizePool.toLocaleString()}</Text>
-                  <View style={[styles.statusBadge, t.status === "live" ? styles.statusLive : t.status === "completed" ? styles.statusDone : styles.statusUp]}>
-                    <Text style={styles.statusText}>{t.status.toUpperCase()}</Text>
-                  </View>
-                </View>
-                <View style={styles.lockBadge}>
-                  <Feather name="lock" size={14} color={COLORS.muted} />
-                </View>
-              </View>
-            ))}
-            <View style={{ height: 40 }} />
-          </View>
+          <TournamentsTab
+            firestoreTournaments={firestoreTournaments}
+            defaultTournaments={tournaments.filter((t) => !t.isCustom)}
+            showForm={showForm}
+            editingId={editingId}
+            form={form}
+            saving={saving}
+            deletingId={deletingId}
+            onOpenCreate={openCreate}
+            onOpenEdit={openEdit}
+            onDelete={handleDelete}
+            onSave={handleSave}
+            onClose={closeForm}
+            setField={setField}
+          />
         )}
-
         {activeTab === "payments" && (
-          <View>
-            <Text style={styles.sectionTitle}>Pending Payments ({pendingPayments.length})</Text>
-            {pendingPayments.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Feather name="check-circle" size={32} color={COLORS.success} />
-                <Text style={styles.emptyText}>All payments verified!</Text>
-                <Text style={styles.emptySubText}>No pending payments at the moment.</Text>
-              </View>
-            ) : (
-              pendingPayments.map((p) => {
-                const match = joinedMatches.find((m) => m.tournamentId === p.tournamentId && m.paymentStatus === "pending");
-                return (
-                  <View key={p.id} style={styles.paymentCard}>
-                    <View style={styles.paymentHeader}>
-                      <Text style={styles.paymentTitle}>{p.tournamentTitle || tournaments.find(t => t.id === p.tournamentId)?.title || "Tournament"}</Text>
-                      <View style={styles.pendingBadge}>
-                        <Text style={styles.pendingBadgeText}>PENDING</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.paymentMeta}>Amount: ₹{p.amount}</Text>
-                    <Text style={styles.paymentMeta}>UPI: {p.upiId}</Text>
-                    <Text style={styles.paymentMeta}>Time: {new Date(p.createdAt).toLocaleString()}</Text>
-                    {p.screenshot ? (
-                      <Image source={{ uri: p.screenshot }} style={styles.screenshot} resizeMode="cover" />
-                    ) : (
-                      <View style={styles.noScreenshot}>
-                        <Feather name="image" size={20} color={COLORS.muted} />
-                        <Text style={styles.noScreenshotText}>No screenshot uploaded</Text>
-                      </View>
-                    )}
-                    <View style={styles.paymentActions}>
-                      <Pressable
-                        style={styles.rejectBtn}
-                        onPress={() => handleReject(p.id, match?.id ?? "", p.tournamentTitle || "Tournament")}
-                      >
-                        <Feather name="x-circle" size={16} color={COLORS.danger} />
-                        <Text style={styles.rejectBtnText}>Reject</Text>
-                      </Pressable>
-                      <Pressable
-                        style={styles.verifyBtn}
-                        onPress={() => handleVerify(p.id, match?.id ?? "", p.tournamentTitle || "Tournament")}
-                      >
-                        <Feather name="check-circle" size={16} color="#000" />
-                        <Text style={styles.verifyBtnText}>Verify</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                );
-              })
-            )}
-
-            <Text style={styles.sectionTitle}>All Payments ({payments.length})</Text>
-            {payments.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Text style={styles.emptyText}>No payments yet.</Text>
-              </View>
-            ) : (
-              payments.map((p) => (
-                <View key={p.id} style={[styles.paymentCard, p.status !== "pending" && styles.resolvedCard]}>
-                  <View style={styles.paymentHeader}>
-                    <Text style={styles.paymentTitle}>{p.tournamentTitle || "Tournament"}</Text>
-                    <View style={[styles.pendingBadge, p.status === "verified" ? styles.verifiedBadge : p.status === "failed" ? styles.failedBadge : {}]}>
-                      <Text style={[styles.pendingBadgeText, p.status === "verified" ? { color: COLORS.success } : p.status === "failed" ? { color: COLORS.danger } : {}]}>
-                        {p.status.toUpperCase()}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.paymentMeta}>₹{p.amount} · {new Date(p.createdAt).toLocaleString()}</Text>
-                </View>
-              ))
-            )}
-            <View style={{ height: 40 }} />
-          </View>
+          <PaymentsTab
+            payments={payments}
+            pendingPayments={pendingPayments}
+            joinedMatches={joinedMatches}
+            onVerify={handleVerify}
+            onReject={handleReject}
+          />
         )}
-
         {activeTab === "room" && (
-          <View>
-            <View style={styles.formCard}>
-              <Text style={styles.formTitle}>Set Room ID & Password</Text>
-              <Text style={styles.formHint}>
-                Set the Room ID and Password for any of your custom tournaments. This makes the match go LIVE and players can see the room details.
-              </Text>
-
-              <Text style={styles.label}>Select Tournament</Text>
-              {customTournaments.filter(t => t.status !== "completed").length === 0 ? (
-                <Text style={[styles.emptyText, { marginBottom: 12 }]}>No active custom tournaments. Create one first.</Text>
-              ) : (
-                customTournaments
-                  .filter((t) => t.status !== "completed")
-                  .map((t) => (
-                    <Pressable
-                      key={t.id}
-                      onPress={() => setRoomTargetId(t.id)}
-                      style={[styles.tournamentSelectRow, roomTargetId === t.id && styles.tournamentSelectRowActive]}
-                    >
-                      <View style={styles.tournamentSelectInfo}>
-                        <Text style={styles.tournamentName}>{t.title}</Text>
-                        <Text style={styles.tournamentMeta}>{t.date} · {t.time}</Text>
-                        {t.roomId && <Text style={styles.existingRoom}>Room: {t.roomId} / {t.roomPassword}</Text>}
-                      </View>
-                      {roomTargetId === t.id && <Feather name="check-circle" size={20} color={COLORS.primary} />}
-                    </Pressable>
-                  ))
-              )}
-
-              <Text style={styles.label}>Room ID</Text>
-              <TextInput style={styles.input} placeholder="e.g. FF9834" placeholderTextColor={COLORS.muted} value={roomId} onChangeText={setRoomId} autoCapitalize="none" />
-
-              <Text style={styles.label}>Room Password</Text>
-              <TextInput style={styles.input} placeholder="e.g. 4321" placeholderTextColor={COLORS.muted} value={roomPass} onChangeText={setRoomPass} autoCapitalize="none" />
-
-              <Pressable style={[styles.saveBtn, { marginTop: 8 }]} onPress={handleSetRoom}>
-                <Text style={styles.saveBtnText}>Set Room & Go Live 🔥</Text>
-              </Pressable>
-            </View>
-            <View style={{ height: 40 }} />
-          </View>
+          <RoomTab
+            firestoreTournaments={firestoreTournaments}
+            roomTargetId={roomTargetId}
+            roomId={roomId}
+            roomPass={roomPass}
+            settingRoom={settingRoom}
+            onSelectTournament={setRoomTargetId}
+            onSetRoomId={setRoomId}
+            onSetRoomPass={setRoomPass}
+            onSubmit={handleSetRoom}
+          />
         )}
+        <View style={{ height: 60 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: COLORS.bg },
+function TournamentForm({
+  form,
+  saving,
+  editingId,
+  setField,
+  onSave,
+  onClose,
+}: {
+  form: TournamentForm;
+  saving: boolean;
+  editingId: string | null;
+  setField: <K extends keyof TournamentForm>(k: K, v: TournamentForm[K]) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <View style={s.card}>
+      <Text style={s.cardTitle}>{editingId ? "Edit Tournament" : "New Tournament"}</Text>
 
-  loginContainer: { flex: 1, backgroundColor: COLORS.bg, justifyContent: "center", padding: 24 },
-  loginContent: { alignItems: "center" },
-  shieldIcon: {
+      <Label>Tournament Name *</Label>
+      <TextInput style={s.input} placeholder="e.g. Night Warriors Cup" placeholderTextColor={C.muted} value={form.title} onChangeText={(v) => setField("title", v)} />
+
+      <Label>Mode *</Label>
+      <PillRow
+        options={["Solo", "Duo", "Squad"]}
+        value={form.type}
+        onSelect={(v) => setField("type", v as any)}
+      />
+
+      <View style={s.row}>
+        <View style={{ flex: 1 }}>
+          <Label>Entry Fee (₹) *</Label>
+          <TextInput style={s.input} placeholder="50" placeholderTextColor={C.muted} keyboardType="numeric" value={form.entryFee} onChangeText={(v) => setField("entryFee", v)} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Label>Prize Pool (₹) *</Label>
+          <TextInput style={s.input} placeholder="5000" placeholderTextColor={C.muted} keyboardType="numeric" value={form.prizePool} onChangeText={(v) => setField("prizePool", v)} />
+        </View>
+      </View>
+
+      <View style={s.row}>
+        <View style={{ flex: 1 }}>
+          <Label>Total Slots</Label>
+          <TextInput style={s.input} placeholder="100" placeholderTextColor={C.muted} keyboardType="numeric" value={form.totalSlots} onChangeText={(v) => setField("totalSlots", v)} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Label>Map</Label>
+          <TextInput style={s.input} placeholder="Bermuda" placeholderTextColor={C.muted} value={form.map} onChangeText={(v) => setField("map", v)} />
+        </View>
+      </View>
+
+      <View style={s.row}>
+        <View style={{ flex: 1 }}>
+          <Label>Date * (YYYY-MM-DD)</Label>
+          <TextInput style={s.input} placeholder="2026-06-01" placeholderTextColor={C.muted} value={form.date} onChangeText={(v) => setField("date", v)} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Label>Time *</Label>
+          <TextInput style={s.input} placeholder="8:00 PM" placeholderTextColor={C.muted} value={form.time} onChangeText={(v) => setField("time", v)} />
+        </View>
+      </View>
+
+      <Label>Status</Label>
+      <PillRow
+        options={["upcoming", "live", "completed"]}
+        value={form.status}
+        onSelect={(v) => setField("status", v as any)}
+        labels={["Upcoming", "Live", "Completed"]}
+      />
+
+      <Label>Room ID (optional)</Label>
+      <TextInput style={s.input} placeholder="Leave blank for upcoming" placeholderTextColor={C.muted} value={form.roomId} onChangeText={(v) => setField("roomId", v)} autoCapitalize="none" />
+
+      <Label>Room Password (optional)</Label>
+      <TextInput style={s.input} placeholder="Leave blank for upcoming" placeholderTextColor={C.muted} value={form.roomPassword} onChangeText={(v) => setField("roomPassword", v)} autoCapitalize="none" />
+
+      <View style={[s.row, { marginTop: 16, gap: 10 }]}>
+        <Pressable style={s.cancelBtn} onPress={onClose}>
+          <Text style={{ color: C.muted, fontWeight: "600" }}>Cancel</Text>
+        </Pressable>
+        <Pressable style={[s.primaryBtn, saving && { opacity: 0.5 }]} onPress={onSave} disabled={saving}>
+          {saving ? (
+            <ActivityIndicator size="small" color="#000" />
+          ) : (
+            <Text style={s.primaryBtnText}>{editingId ? "Save Changes" : "Create"}</Text>
+          )}
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function TournamentsTab({
+  firestoreTournaments,
+  defaultTournaments,
+  showForm,
+  editingId,
+  form,
+  saving,
+  deletingId,
+  onOpenCreate,
+  onOpenEdit,
+  onDelete,
+  onSave,
+  onClose,
+  setField,
+}: {
+  firestoreTournaments: Tournament[];
+  defaultTournaments: Tournament[];
+  showForm: boolean;
+  editingId: string | null;
+  form: TournamentForm;
+  saving: boolean;
+  deletingId: string | null;
+  onOpenCreate: () => void;
+  onOpenEdit: (t: Tournament) => void;
+  onDelete: (t: Tournament) => void;
+  onSave: () => void;
+  onClose: () => void;
+  setField: <K extends keyof TournamentForm>(k: K, v: TournamentForm[K]) => void;
+}) {
+  return (
+    <View>
+      {!showForm ? (
+        <Pressable style={s.createBtn} onPress={onOpenCreate}>
+          <Feather name="plus-circle" size={20} color="#000" />
+          <Text style={s.createBtnText}>Create New Tournament</Text>
+        </Pressable>
+      ) : (
+        <TournamentForm
+          form={form}
+          saving={saving}
+          editingId={editingId}
+          setField={setField}
+          onSave={onSave}
+          onClose={onClose}
+        />
+      )}
+
+      <SectionTitle>Firebase Tournaments ({firestoreTournaments.length})</SectionTitle>
+      {firestoreTournaments.length === 0 ? (
+        <EmptyCard
+          icon="cloud"
+          text="No Firebase tournaments yet."
+          sub="Create one above — it'll sync to all devices in real-time."
+        />
+      ) : (
+        firestoreTournaments.map((t) => (
+          <View key={t.id} style={s.tRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.tName}>{t.title}</Text>
+              <Text style={s.tMeta}>
+                {t.type} · ₹{t.entryFee} entry · Prize ₹{t.prizePool.toLocaleString()}
+              </Text>
+              <Text style={s.tMeta}>{t.date} · {t.time} · {t.map}</Text>
+              {t.roomId ? (
+                <Text style={[s.tMeta, { color: C.success }]}>
+                  Room: {t.roomId} / {t.roomPassword}
+                </Text>
+              ) : null}
+              <StatusBadge status={t.status} />
+            </View>
+            <View style={{ flexDirection: "row", gap: 4 }}>
+              <Pressable style={s.iconBtn} onPress={() => onOpenEdit(t)}>
+                <Feather name="edit-2" size={16} color={C.primary} />
+              </Pressable>
+              <Pressable style={s.iconBtn} onPress={() => onDelete(t)} disabled={deletingId === t.id}>
+                {deletingId === t.id ? (
+                  <ActivityIndicator size="small" color={C.danger} />
+                ) : (
+                  <Feather name="trash-2" size={16} color={C.danger} />
+                )}
+              </Pressable>
+            </View>
+          </View>
+        ))
+      )}
+
+      <SectionTitle>Default Tournaments ({defaultTournaments.length})</SectionTitle>
+      {defaultTournaments.map((t) => (
+        <View key={t.id} style={[s.tRow, { opacity: 0.5 }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.tName}>{t.title}</Text>
+            <Text style={s.tMeta}>{t.type} · ₹{t.entryFee} entry · Prize ₹{t.prizePool.toLocaleString()}</Text>
+            <StatusBadge status={t.status} />
+          </View>
+          <Feather name="lock" size={14} color={C.muted} />
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function PaymentsTab({
+  payments,
+  pendingPayments,
+  joinedMatches,
+  onVerify,
+  onReject,
+}: {
+  payments: any[];
+  pendingPayments: any[];
+  joinedMatches: any[];
+  onVerify: (pid: string, mid: string, title: string) => void;
+  onReject: (pid: string, mid: string, title: string) => void;
+}) {
+  return (
+    <View>
+      <SectionTitle>Pending Payments ({pendingPayments.length})</SectionTitle>
+      {pendingPayments.length === 0 ? (
+        <EmptyCard icon="check-circle" text="All payments verified!" sub="No pending payments." />
+      ) : (
+        pendingPayments.map((p) => {
+          const match = joinedMatches.find(
+            (m: any) => m.tournamentId === p.tournamentId && m.paymentStatus === "pending"
+          );
+          return (
+            <View key={p.id} style={s.payCard}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
+                <Text style={[s.tName, { flex: 1 }]}>{p.tournamentTitle || "Tournament"}</Text>
+                <View style={s.badgeWarn}>
+                  <Text style={[s.badgeText, { color: C.warning }]}>PENDING</Text>
+                </View>
+              </View>
+              <Text style={s.tMeta}>Amount: ₹{p.amount}</Text>
+              <Text style={s.tMeta}>UPI: {p.upiId}</Text>
+              <Text style={s.tMeta}>Time: {new Date(p.createdAt).toLocaleString()}</Text>
+              {p.screenshot ? (
+                <Image source={{ uri: p.screenshot }} style={s.screenshot} resizeMode="cover" />
+              ) : (
+                <View style={s.noScreenshot}>
+                  <Feather name="image" size={20} color={C.muted} />
+                  <Text style={[s.tMeta, { marginTop: 4 }]}>No screenshot uploaded</Text>
+                </View>
+              )}
+              <View style={[s.row, { gap: 10, marginTop: 8 }]}>
+                <Pressable
+                  style={s.rejectBtn}
+                  onPress={() => onReject(p.id, match?.id ?? "", p.tournamentTitle ?? "Tournament")}
+                >
+                  <Feather name="x-circle" size={15} color={C.danger} />
+                  <Text style={{ color: C.danger, fontWeight: "600" }}>Reject</Text>
+                </Pressable>
+                <Pressable
+                  style={s.verifyBtn}
+                  onPress={() => onVerify(p.id, match?.id ?? "", p.tournamentTitle ?? "Tournament")}
+                >
+                  <Feather name="check-circle" size={15} color="#000" />
+                  <Text style={{ color: "#000", fontWeight: "700" }}>Verify</Text>
+                </Pressable>
+              </View>
+            </View>
+          );
+        })
+      )}
+
+      <SectionTitle>All Payments ({payments.length})</SectionTitle>
+      {payments.length === 0 ? (
+        <EmptyCard icon="inbox" text="No payments yet." sub="" />
+      ) : (
+        payments.map((p) => (
+          <View key={p.id} style={[s.payCard, p.status !== "pending" && { opacity: 0.55 }]}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+              <Text style={[s.tName, { flex: 1 }]}>{p.tournamentTitle || "Tournament"}</Text>
+              <View
+                style={[
+                  s.badgeWarn,
+                  p.status === "verified" && { backgroundColor: "rgba(34,197,94,0.15)" },
+                  p.status === "failed" && { backgroundColor: "rgba(239,68,68,0.15)" },
+                ]}
+              >
+                <Text
+                  style={[
+                    s.badgeText,
+                    p.status === "verified" && { color: C.success },
+                    p.status === "failed" && { color: C.danger },
+                    p.status === "pending" && { color: C.warning },
+                  ]}
+                >
+                  {p.status.toUpperCase()}
+                </Text>
+              </View>
+            </View>
+            <Text style={s.tMeta}>₹{p.amount} · {new Date(p.createdAt).toLocaleString()}</Text>
+          </View>
+        ))
+      )}
+    </View>
+  );
+}
+
+function RoomTab({
+  firestoreTournaments,
+  roomTargetId,
+  roomId,
+  roomPass,
+  settingRoom,
+  onSelectTournament,
+  onSetRoomId,
+  onSetRoomPass,
+  onSubmit,
+}: {
+  firestoreTournaments: Tournament[];
+  roomTargetId: string;
+  roomId: string;
+  roomPass: string;
+  settingRoom: boolean;
+  onSelectTournament: (id: string) => void;
+  onSetRoomId: (v: string) => void;
+  onSetRoomPass: (v: string) => void;
+  onSubmit: () => void;
+}) {
+  const eligible = firestoreTournaments.filter((t) => t.status !== "completed");
+  return (
+    <View style={s.card}>
+      <Text style={s.cardTitle}>Set Room ID & Password</Text>
+      <Text style={[s.tMeta, { marginBottom: 14, lineHeight: 20 }]}>
+        Select a Firebase tournament and set its room details. This makes the match go LIVE and players will see the Room ID in their app.
+      </Text>
+
+      <Label>Select Tournament</Label>
+      {eligible.length === 0 ? (
+        <Text style={[s.tMeta, { marginBottom: 12 }]}>
+          No active Firebase tournaments. Create one in the Tournaments tab first.
+        </Text>
+      ) : (
+        eligible.map((t) => (
+          <Pressable
+            key={t.id}
+            onPress={() => onSelectTournament(t.id)}
+            style={[
+              s.selectRow,
+              roomTargetId === t.id && {
+                borderColor: C.primary,
+                backgroundColor: "rgba(255,107,0,0.08)",
+              },
+            ]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={s.tName}>{t.title}</Text>
+              <Text style={s.tMeta}>{t.date} · {t.time}</Text>
+              {t.roomId ? (
+                <Text style={[s.tMeta, { color: C.success }]}>
+                  Current: {t.roomId} / {t.roomPassword}
+                </Text>
+              ) : null}
+            </View>
+            {roomTargetId === t.id && (
+              <Feather name="check-circle" size={20} color={C.primary} />
+            )}
+          </Pressable>
+        ))
+      )}
+
+      <Label>Room ID</Label>
+      <TextInput
+        style={s.input}
+        placeholder="e.g. FF9834"
+        placeholderTextColor={C.muted}
+        value={roomId}
+        onChangeText={onSetRoomId}
+        autoCapitalize="none"
+      />
+
+      <Label>Room Password</Label>
+      <TextInput
+        style={s.input}
+        placeholder="e.g. 4321"
+        placeholderTextColor={C.muted}
+        value={roomPass}
+        onChangeText={onSetRoomPass}
+        autoCapitalize="none"
+      />
+
+      <Pressable
+        style={[s.primaryBtn, { marginTop: 12 }, settingRoom && { opacity: 0.5 }]}
+        onPress={onSubmit}
+        disabled={settingRoom}
+      >
+        {settingRoom ? (
+          <ActivityIndicator size="small" color="#000" />
+        ) : (
+          <Text style={s.primaryBtnText}>Set Room & Go Live 🔥</Text>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
+function Label({ children }: { children: React.ReactNode }) {
+  return <Text style={s.label}>{children}</Text>;
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <Text style={s.sectionTitle}>{children}</Text>;
+}
+
+function EmptyCard({ icon, text, sub }: { icon: any; text: string; sub: string }) {
+  return (
+    <View style={s.emptyCard}>
+      <Feather name={icon} size={30} color={C.muted} />
+      <Text style={s.tName}>{text}</Text>
+      {sub ? <Text style={s.tMeta}>{sub}</Text> : null}
+    </View>
+  );
+}
+
+function PillRow({
+  options,
+  value,
+  onSelect,
+  labels,
+}: {
+  options: string[];
+  value: string;
+  onSelect: (v: string) => void;
+  labels?: string[];
+}) {
+  return (
+    <View style={[s.row, { flexWrap: "wrap", gap: 8, marginBottom: 4 }]}>
+      {options.map((opt, i) => (
+        <Pressable
+          key={opt}
+          onPress={() => onSelect(opt)}
+          style={[s.pill, value === opt && s.pillActive]}
+        >
+          <Text style={[s.pillText, value === opt && { color: "#000" }]}>
+            {labels ? labels[i] : opt}
+          </Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+function StatusBadge({ status }: { status: Tournament["status"] }) {
+  const bg =
+    status === "live"
+      ? "rgba(34,197,94,0.18)"
+      : status === "completed"
+      ? "rgba(107,107,138,0.18)"
+      : "rgba(255,107,0,0.18)";
+  const color =
+    status === "live" ? C.success : status === "completed" ? C.muted : C.primary;
+  return (
+    <View style={[s.badge, { backgroundColor: bg, alignSelf: "flex-start", marginTop: 6 }]}>
+      <Text style={[s.badgeText, { color }]}>{status.toUpperCase()}</Text>
+    </View>
+  );
+}
+
+const s = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: C.bg },
+  loginWrap: { flex: 1, justifyContent: "center", padding: 24 },
+  loginBody: { alignItems: "center" },
+  shield: {
     width: 80, height: 80, borderRadius: 40,
-    backgroundColor: COLORS.card, borderWidth: 2, borderColor: COLORS.primary,
+    backgroundColor: C.card, borderWidth: 2, borderColor: C.primary,
     alignItems: "center", justifyContent: "center", marginBottom: 24,
   },
-  loginTitle: { fontSize: 28, fontWeight: "700", color: COLORS.text, marginBottom: 8 },
-  loginSubtitle: { fontSize: 14, color: COLORS.muted, marginBottom: 32, textAlign: "center" },
-  inputWrapper: {
-    flexDirection: "row", alignItems: "center", backgroundColor: COLORS.input,
-    borderRadius: 12, borderWidth: 1, borderColor: COLORS.inputBorder,
-    marginBottom: 16, width: "100%",
+  loginTitle: { fontSize: 28, fontWeight: "700", color: C.text, marginBottom: 8 },
+  loginSub: { fontSize: 14, color: C.muted, marginBottom: 32, textAlign: "center" },
+  inputRow: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: C.input, borderRadius: 12, borderWidth: 1,
+    borderColor: C.inputBorder, marginBottom: 16, width: "100%",
   },
-  inputIcon: { paddingHorizontal: 14 },
-  loginInput: { flex: 1, height: 52, color: COLORS.text, fontSize: 16 },
-  eyeBtn: { padding: 14 },
+  loginInput: { flex: 1, height: 52, color: C.text, fontSize: 16 },
   loginBtn: {
-    backgroundColor: COLORS.primary, borderRadius: 12, height: 52,
+    backgroundColor: C.primary, borderRadius: 12, height: 52,
     width: "100%", alignItems: "center", justifyContent: "center",
   },
   loginBtnText: { color: "#fff", fontWeight: "700", fontSize: 16 },
 
   header: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder,
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: C.cardBorder,
   },
-  headerCenter: { flexDirection: "row", alignItems: "center", gap: 8 },
-  headerTitle: { fontSize: 18, fontWeight: "700", color: COLORS.text },
+  headerTitle: { fontSize: 18, fontWeight: "700", color: C.text },
   backBtn: { padding: 8 },
-  logoutBtn: { padding: 8 },
 
-  tabs: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder },
+  errorBanner: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: "rgba(239,68,68,0.12)", paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: "rgba(239,68,68,0.25)",
+  },
+  errorBannerText: { color: C.danger, fontSize: 12, flex: 1, lineHeight: 18 },
+
+  tabs: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: C.cardBorder },
   tab: { flex: 1, paddingVertical: 12, alignItems: "center" },
-  tabActive: { borderBottomWidth: 2, borderBottomColor: COLORS.primary },
-  tabText: { fontSize: 12, color: COLORS.muted, fontWeight: "600" },
-  tabTextActive: { color: COLORS.primary },
+  tabActive: { borderBottomWidth: 2, borderBottomColor: C.primary },
+  tabText: { fontSize: 11, color: C.muted, fontWeight: "600" },
+  tabTextActive: { color: C.primary },
 
-  content: { flex: 1, padding: 16 },
+  card: {
+    backgroundColor: C.card, borderRadius: 16, padding: 16,
+    marginBottom: 20, borderWidth: 1, borderColor: C.cardBorder,
+  },
+  cardTitle: { fontSize: 17, fontWeight: "700", color: C.text, marginBottom: 12 },
 
+  label: { fontSize: 12, color: C.muted, marginBottom: 5, marginTop: 10, fontWeight: "600", letterSpacing: 0.3 },
+  input: {
+    backgroundColor: C.input, borderRadius: 10, borderWidth: 1,
+    borderColor: C.inputBorder, paddingHorizontal: 14,
+    height: 46, color: C.text, fontSize: 15, marginBottom: 2,
+  },
+
+  row: { flexDirection: "row", gap: 10 },
+  pill: {
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: 20, borderWidth: 1, borderColor: C.inputBorder,
+    backgroundColor: C.input,
+  },
+  pillActive: { backgroundColor: C.primary, borderColor: C.primary },
+  pillText: { color: C.muted, fontWeight: "600", fontSize: 13 },
+
+  cancelBtn: {
+    flex: 1, borderRadius: 10, borderWidth: 1, borderColor: C.inputBorder,
+    alignItems: "center", justifyContent: "center", height: 46,
+  },
+  primaryBtn: {
+    flex: 1, backgroundColor: C.primary, borderRadius: 10,
+    alignItems: "center", justifyContent: "center", height: 46,
+    flexDirection: "row", gap: 8,
+  },
+  primaryBtnText: { color: "#000", fontWeight: "700", fontSize: 15 },
   createBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center",
-    gap: 10, backgroundColor: COLORS.primary, borderRadius: 12,
+    gap: 10, backgroundColor: C.primary, borderRadius: 12,
     paddingVertical: 14, marginBottom: 20,
   },
   createBtnText: { color: "#000", fontWeight: "700", fontSize: 16 },
 
-  formCard: { backgroundColor: COLORS.card, borderRadius: 16, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: COLORS.cardBorder },
-  formTitle: { fontSize: 18, fontWeight: "700", color: COLORS.text, marginBottom: 4 },
-  formHint: { fontSize: 13, color: COLORS.muted, marginBottom: 16, lineHeight: 20 },
-
-  label: { fontSize: 13, color: COLORS.muted, marginBottom: 6, marginTop: 10, fontWeight: "600" },
-  input: {
-    backgroundColor: COLORS.input, borderRadius: 10, borderWidth: 1, borderColor: COLORS.inputBorder,
-    paddingHorizontal: 14, height: 48, color: COLORS.text, fontSize: 15, marginBottom: 4,
+  sectionTitle: { fontSize: 15, fontWeight: "700", color: C.text, marginTop: 8, marginBottom: 10 },
+  emptyCard: {
+    backgroundColor: C.card, borderRadius: 14, padding: 24,
+    alignItems: "center", gap: 8, marginBottom: 14,
+    borderWidth: 1, borderColor: C.cardBorder,
   },
 
-  pillRow: { flexDirection: "row", gap: 8, marginBottom: 4 },
-  pill: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: COLORS.inputBorder, backgroundColor: COLORS.input },
-  pillActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  pillText: { color: COLORS.muted, fontWeight: "600", fontSize: 14 },
-  pillTextActive: { color: "#000" },
-
-  row: { flexDirection: "row", gap: 10 },
-  halfField: { flex: 1 },
-
-  formActions: { flexDirection: "row", gap: 10, marginTop: 16 },
-  cancelBtn: { flex: 1, borderRadius: 10, borderWidth: 1, borderColor: COLORS.inputBorder, alignItems: "center", justifyContent: "center", height: 48 },
-  cancelBtnText: { color: COLORS.muted, fontWeight: "600" },
-  saveBtn: { flex: 1, backgroundColor: COLORS.primary, borderRadius: 10, alignItems: "center", justifyContent: "center", height: 48 },
-  saveBtnDisabled: { opacity: 0.5 },
-  saveBtnText: { color: "#000", fontWeight: "700", fontSize: 15 },
-
-  sectionTitle: { fontSize: 16, fontWeight: "700", color: COLORS.text, marginTop: 8, marginBottom: 12 },
-  emptyCard: { backgroundColor: COLORS.card, borderRadius: 16, padding: 28, alignItems: "center", gap: 8, marginBottom: 16, borderWidth: 1, borderColor: COLORS.cardBorder },
-  emptyText: { color: COLORS.text, fontWeight: "600", fontSize: 15, textAlign: "center" },
-  emptySubText: { color: COLORS.muted, fontSize: 13, textAlign: "center" },
-
-  tournamentRow: {
-    flexDirection: "row", backgroundColor: COLORS.card, borderRadius: 14, padding: 14,
-    marginBottom: 10, borderWidth: 1, borderColor: COLORS.cardBorder, alignItems: "flex-start",
+  tRow: {
+    flexDirection: "row", backgroundColor: C.card, borderRadius: 14,
+    padding: 14, marginBottom: 10, borderWidth: 1, borderColor: C.cardBorder,
+    alignItems: "flex-start",
   },
-  defaultRow: { opacity: 0.6 },
-  tournamentInfo: { flex: 1 },
-  tournamentName: { fontSize: 15, fontWeight: "700", color: COLORS.text, marginBottom: 4 },
-  tournamentMeta: { fontSize: 13, color: COLORS.muted, marginBottom: 2 },
-  statusBadge: { alignSelf: "flex-start", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, marginTop: 6 },
-  statusLive: { backgroundColor: "rgba(34,197,94,0.2)" },
-  statusDone: { backgroundColor: "rgba(107,107,138,0.2)" },
-  statusUp: { backgroundColor: "rgba(255,107,0,0.2)" },
-  statusText: { fontSize: 11, fontWeight: "700", color: COLORS.text },
-  deleteBtn: { padding: 8 },
-  lockBadge: { padding: 8 },
-
-  paymentCard: {
-    backgroundColor: COLORS.card, borderRadius: 14, padding: 14,
-    marginBottom: 12, borderWidth: 1, borderColor: COLORS.cardBorder,
+  tName: { fontSize: 14, fontWeight: "700", color: C.text, marginBottom: 3 },
+  tMeta: { fontSize: 12, color: C.muted, marginBottom: 1 },
+  iconBtn: {
+    width: 36, height: 36, borderRadius: 8, backgroundColor: C.input,
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: C.inputBorder,
   },
-  resolvedCard: { opacity: 0.6 },
-  paymentHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
-  paymentTitle: { fontSize: 15, fontWeight: "700", color: COLORS.text, flex: 1 },
-  paymentMeta: { fontSize: 13, color: COLORS.muted, marginBottom: 2 },
-  pendingBadge: { backgroundColor: "rgba(245,158,11,0.2)", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
-  pendingBadgeText: { fontSize: 11, fontWeight: "700", color: COLORS.warning },
-  verifiedBadge: { backgroundColor: "rgba(34,197,94,0.2)" },
-  failedBadge: { backgroundColor: "rgba(239,68,68,0.2)" },
-  screenshot: { width: "100%", height: 180, borderRadius: 10, marginTop: 10, marginBottom: 10 },
+  badge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeText: { fontSize: 10, fontWeight: "700" },
+  badgeWarn: { backgroundColor: "rgba(245,158,11,0.15)", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, alignSelf: "flex-start" },
+
+  payCard: {
+    backgroundColor: C.card, borderRadius: 14, padding: 14,
+    marginBottom: 12, borderWidth: 1, borderColor: C.cardBorder,
+  },
+  screenshot: { width: "100%", height: 170, borderRadius: 10, marginTop: 10, marginBottom: 4 },
   noScreenshot: {
-    height: 80, borderRadius: 10, borderWidth: 1, borderColor: COLORS.inputBorder,
-    alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, marginBottom: 8,
-    borderStyle: "dashed",
+    height: 70, borderRadius: 10, borderWidth: 1, borderColor: C.inputBorder,
+    alignItems: "center", justifyContent: "center", marginTop: 8, borderStyle: "dashed",
   },
-  noScreenshotText: { color: COLORS.muted, fontSize: 13 },
-  paymentActions: { flexDirection: "row", gap: 10, marginTop: 4 },
   rejectBtn: {
     flex: 1, flexDirection: "row", gap: 6, alignItems: "center", justifyContent: "center",
-    borderRadius: 10, borderWidth: 1, borderColor: COLORS.danger, height: 42,
+    borderRadius: 10, borderWidth: 1, borderColor: C.danger, height: 40,
   },
-  rejectBtnText: { color: COLORS.danger, fontWeight: "600" },
   verifyBtn: {
     flex: 1, flexDirection: "row", gap: 6, alignItems: "center", justifyContent: "center",
-    backgroundColor: COLORS.success, borderRadius: 10, height: 42,
+    backgroundColor: C.success, borderRadius: 10, height: 40,
   },
-  verifyBtnText: { color: "#000", fontWeight: "700" },
 
-  tournamentSelectRow: {
-    flexDirection: "row", alignItems: "center", backgroundColor: COLORS.input,
-    borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: COLORS.inputBorder,
+  selectRow: {
+    flexDirection: "row", alignItems: "center", backgroundColor: C.input,
+    borderRadius: 12, padding: 14, marginBottom: 8,
+    borderWidth: 1, borderColor: C.inputBorder,
   },
-  tournamentSelectRowActive: { borderColor: COLORS.primary, backgroundColor: "rgba(255,107,0,0.08)" },
-  tournamentSelectInfo: { flex: 1 },
-  existingRoom: { fontSize: 12, color: COLORS.success, marginTop: 4, fontWeight: "600" },
 });

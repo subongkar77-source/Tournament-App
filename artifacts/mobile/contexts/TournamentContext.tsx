@@ -1,6 +1,13 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useContext, useEffect, useState } from "react";
 
+import {
+  createTournament as fbCreate,
+  deleteTournament as fbDelete,
+  subscribeTournaments,
+  updateTournament as fbUpdate,
+} from "@/lib/tournamentService";
+
 export interface Tournament {
   id: string;
   title: string;
@@ -50,9 +57,15 @@ export interface Payment {
 
 interface TournamentContextType {
   tournaments: Tournament[];
+  firestoreTournaments: Tournament[];
   joinedMatches: JoinedMatch[];
   payments: Payment[];
-  joinTournament: (tournamentId: string, userId: string, paymentData: Omit<Payment, "id" | "createdAt">) => Promise<void>;
+  firebaseError: string | null;
+  joinTournament: (
+    tournamentId: string,
+    userId: string,
+    paymentData: Omit<Payment, "id" | "createdAt">
+  ) => Promise<void>;
   getJoinedMatch: (tournamentId: string, userId: string) => JoinedMatch | undefined;
   refreshData: () => Promise<void>;
   addTournament: (tournament: Omit<Tournament, "id" | "isCustom">) => Promise<void>;
@@ -66,7 +79,6 @@ const TournamentContext = createContext<TournamentContextType | null>(null);
 
 const JOINED_MATCHES_KEY = "ff_joined_matches";
 const PAYMENTS_KEY = "ff_payments";
-const CUSTOM_TOURNAMENTS_KEY = "ff_custom_tournaments";
 
 const MOCK_TOURNAMENTS: Tournament[] = [
   {
@@ -141,10 +153,21 @@ const MOCK_TOURNAMENTS: Tournament[] = [
 export function TournamentProvider({ children }: { children: React.ReactNode }) {
   const [joinedMatches, setJoinedMatches] = useState<JoinedMatch[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [customTournaments, setCustomTournaments] = useState<Tournament[]>([]);
+  const [firestoreTournaments, setFirestoreTournaments] = useState<Tournament[]>([]);
+  const [firebaseError, setFirebaseError] = useState<string | null>(null);
 
   useEffect(() => {
     refreshData();
+    const unsub = subscribeTournaments(
+      (data) => {
+        setFirestoreTournaments(data);
+        setFirebaseError(null);
+      },
+      (err) => {
+        setFirebaseError(err.message);
+      }
+    );
+    return unsub;
   }, []);
 
   async function refreshData() {
@@ -153,36 +176,33 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       if (jmRaw) setJoinedMatches(JSON.parse(jmRaw));
       const pRaw = await AsyncStorage.getItem(PAYMENTS_KEY);
       if (pRaw) setPayments(JSON.parse(pRaw));
-      const ctRaw = await AsyncStorage.getItem(CUSTOM_TOURNAMENTS_KEY);
-      if (ctRaw) setCustomTournaments(JSON.parse(ctRaw));
     } catch {}
   }
 
-  const allTournaments = [...MOCK_TOURNAMENTS, ...customTournaments];
+  const allTournaments = [...MOCK_TOURNAMENTS, ...firestoreTournaments];
 
   async function addTournament(tournamentData: Omit<Tournament, "id" | "isCustom">) {
-    const tournament: Tournament = {
-      ...tournamentData,
-      id: "ct_" + Date.now().toString() + Math.random().toString(36).substr(2, 4),
-      isCustom: true,
-    };
-    const updated = [...customTournaments, tournament];
-    await AsyncStorage.setItem(CUSTOM_TOURNAMENTS_KEY, JSON.stringify(updated));
-    setCustomTournaments(updated);
+    try {
+      await fbCreate(tournamentData);
+    } catch (err: any) {
+      throw new Error(err?.message ?? "Failed to create tournament in Firebase");
+    }
   }
 
   async function updateTournament(id: string, updates: Partial<Tournament>) {
-    const updated = customTournaments.map((t) =>
-      t.id === id ? { ...t, ...updates } : t
-    );
-    await AsyncStorage.setItem(CUSTOM_TOURNAMENTS_KEY, JSON.stringify(updated));
-    setCustomTournaments(updated);
+    try {
+      await fbUpdate(id, updates);
+    } catch (err: any) {
+      throw new Error(err?.message ?? "Failed to update tournament in Firebase");
+    }
   }
 
   async function deleteTournament(id: string) {
-    const updated = customTournaments.filter((t) => t.id !== id);
-    await AsyncStorage.setItem(CUSTOM_TOURNAMENTS_KEY, JSON.stringify(updated));
-    setCustomTournaments(updated);
+    try {
+      await fbDelete(id);
+    } catch (err: any) {
+      throw new Error(err?.message ?? "Failed to delete tournament from Firebase");
+    }
   }
 
   async function verifyPayment(paymentId: string, matchId: string) {
@@ -190,7 +210,9 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
       p.id === paymentId ? { ...p, status: "verified" as const } : p
     );
     const updatedMatches = joinedMatches.map((m) =>
-      m.id === matchId ? { ...m, paymentStatus: "verified" as const, status: "confirmed" as const } : m
+      m.id === matchId
+        ? { ...m, paymentStatus: "verified" as const, status: "confirmed" as const }
+        : m
     );
     await AsyncStorage.setItem(PAYMENTS_KEY, JSON.stringify(updatedPayments));
     await AsyncStorage.setItem(JOINED_MATCHES_KEY, JSON.stringify(updatedMatches));
@@ -247,7 +269,6 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
 
     await AsyncStorage.setItem(PAYMENTS_KEY, JSON.stringify(newPayments));
     await AsyncStorage.setItem(JOINED_MATCHES_KEY, JSON.stringify(newMatches));
-
     setPayments(newPayments);
     setJoinedMatches(newMatches);
   }
@@ -262,8 +283,10 @@ export function TournamentProvider({ children }: { children: React.ReactNode }) 
     <TournamentContext.Provider
       value={{
         tournaments: allTournaments,
+        firestoreTournaments,
         joinedMatches,
         payments,
+        firebaseError,
         joinTournament,
         getJoinedMatch,
         refreshData,
