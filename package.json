@@ -1,13 +1,13 @@
+
 {
   "name": "workspace",
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "build": "pnpm -r --if-present run build",
-    "start": "pnpm --filter @workspace/api-server start"
+    "build": "pnpm install && pnpm -r --if-present run build",
+    "start": "pnpm --filter api-server start"
   },
   "devDependencies": {
     "pnpm": "latest"
   }
 }
-
